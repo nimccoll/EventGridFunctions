@@ -1,24 +1,16 @@
-//===============================================================================
-// Microsoft FastTrack for Azure
-// Azure Event Grid and Service Bus Triggered Functions
-//===============================================================================
-// Copyright © Microsoft Corporation.  All rights reserved.
-// THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY
-// OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT
-// LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
-// FITNESS FOR A PARTICULAR PURPOSE.
-//===============================================================================
-using Microsoft.Azure.ServiceBus;
-using Microsoft.Azure.WebJobs;
-using Microsoft.Azure.WebJobs.Extensions.DurableTask;
-using Microsoft.Azure.WebJobs.Extensions.Http;
-using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
+using Microsoft.Azure.ServiceBus;
+using Microsoft.Azure.WebJobs;
+using Microsoft.Azure.WebJobs.Extensions.DurableTask;
+using Microsoft.Azure.WebJobs.Extensions.Http;
+using Microsoft.Azure.WebJobs.Host;
+using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
 
 namespace MultipleFileProcessorOrchestrator
 {
@@ -33,7 +25,9 @@ namespace MultipleFileProcessorOrchestrator
             if (_topicClient == null)
             {
                 string connectionString = Environment.GetEnvironmentVariable("ServiceBusConnString", EnvironmentVariableTarget.Process);
-                _topicClient = new TopicClient(connectionString, _topicName);
+                // Set the retry policy
+                var retryPolicy = new RetryExponential(TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(1000), 5);
+                _topicClient = new TopicClient(connectionString, _topicName, retryPolicy);
             }
         }
 
@@ -47,10 +41,7 @@ namespace MultipleFileProcessorOrchestrator
 
             if (Path.GetExtension(distributorFile.FilePath) == ".csv")
             {
-                // Use this call below to achieve a code separation approach - same function app
                 json = await context.CallActivityAsync<string>("FileProcessor_ProcessCSV", distributorFile);
-                
-                // Use this call below to achieve a deployment separation approach - separate function apps
                 //DurableHttpResponse durableHttpResponse = await context.CallHttpAsync(HttpMethod.Post, new Uri("http://localhost:7072/api/FileProcessor_ProcessCSV"), JsonConvert.SerializeObject(distributorFile));
                 //if (durableHttpResponse.StatusCode == System.Net.HttpStatusCode.OK)
                 //{
@@ -59,10 +50,7 @@ namespace MultipleFileProcessorOrchestrator
             }
             else if (Path.GetExtension(distributorFile.FilePath) == ".pdf")
             {
-                // Use this call below to achieve a code separation approach - same function app
                 json = await context.CallActivityAsync<string>("FileProcessor_ProcessPDF", distributorFile);
-
-                // Use this call below to achieve a deployment separation approach - separate function apps
                 //DurableHttpResponse durableHttpResponse = await context.CallHttpAsync(HttpMethod.Post, new Uri("http://localhost:7072/api/FileProcessor_ProcessPDF"), JsonConvert.SerializeObject(distributorFile));
                 //if (durableHttpResponse.StatusCode == System.Net.HttpStatusCode.OK)
                 //{
@@ -75,8 +63,18 @@ namespace MultipleFileProcessorOrchestrator
                 // Write JSON to Service Bus
                 Message message = new Message(Encoding.UTF8.GetBytes(json));
                 message.UserProperties["FileType"] = Path.GetExtension(distributorFile.FilePath);
-                await _topicClient.SendAsync(message);
-            }
+                try
+                {
+                    await _topicClient.SendAsync(message);
+                }
+                catch (ServiceBusException ex)
+                {
+                    // If we reach this code, the retry policy was unable to handle the exception
+                    // Log the exception and re-throw
+                    log.LogError(ex.Message);
+                    throw;
+                }
+           }
 
             return json;
         }
